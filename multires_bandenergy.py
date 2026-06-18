@@ -422,22 +422,51 @@ if __name__ == "__main__":
     rng = np.random.default_rng(0)
     t = np.arange(N) / fs
 
-    true_freq = 7130.0
-    x = np.sin(2 * np.pi * true_freq * t) + 0.2 * rng.standard_normal(N)
+    # A harder signal: many tones of differing strength, all *gated* to a short
+    # burst in the middle of the record. The abrupt rectangular on/off edges
+    # spread each tone into sinc sidelobes -- spectral leakage. The dominant
+    # 1500 Hz tone leaks far enough to bury the weak 2300 Hz tone sitting beside
+    # it, which is exactly the case that derails a greedy search.
+    tones = [
+        (1500.0, 1.00),   # dominant -- its sidelobes leak across the spectrum
+        (2300.0, 0.22),   # weak, near the dominant -> masked by its leakage
+        (3300.0, 0.45),
+        (6100.0, 0.30),
+        (9200.0, 0.25),
+        (12750.0, 0.20),
+        (16400.0, 0.16),
+        (20800.0, 0.13),
+    ]
+    gate = ((t > 0.25) & (t < 0.60)).astype(float)  # rectangular burst -> sidelobes
+    x = 0.15 * rng.standard_normal(N)
+    for f, a in tones:
+        x += a * np.sin(2 * np.pi * f * t) * gate
 
-    # Global dominant-band search.
+    # Global dominant-band search picks out the strongest tone despite the
+    # forest of weaker peaks and the leakage between them.
     freq, info = find_dominant_frequency_sublinear(
-        x, fs, resolution_hz=25, n_blocks=4, seed=123,
+        x, fs, resolution_hz=25, n_blocks=6, seed=123,
     )
-    print("global  ->", freq)
-    print("  band:", info["band"])
+    print("global dominant ->", round(freq, 1), "Hz   band:",
+          tuple(round(b, 1) for b in info["band"]))
     print("  samples read:", info["samples_read"],
-          "fraction:", info["sample_fraction"])
+          "fraction:", round(info["sample_fraction"], 4))
 
-    # Local peak near a rough seed (e.g. 7000 Hz).
-    peak, pinfo = find_local_peak_sublinear(
-        x, fs, f0=7000.0, resolution_hz=10, n_blocks=4, seed=123,
+    # Local hill-climb from a rough seed near each tone. With a seed in the
+    # tone's own neighborhood every peak is recovered, even the weak 2300 Hz
+    # one tucked under the dominant's sidelobes.
+    print("local peaks (rough seed ~100 Hz off true):")
+    for f, a in tones:
+        peak, pinfo = find_local_peak_sublinear(
+            x, fs, f0=f - 100.0, resolution_hz=10, n_blocks=6, seed=123,
+        )
+        print(f"  true {f:8.1f} (amp {a:.2f}) -> {peak:8.1f}  err {peak - f:+7.1f}")
+
+    # The failure mode sidelobe leakage actually causes: seed the weak 2300 Hz
+    # tone from farther out (2000 Hz) and the dominant's leakage drags the climb
+    # all the way into the 1500 Hz peak instead.
+    captured, _ = find_local_peak_sublinear(
+        x, fs, f0=2000.0, resolution_hz=10, n_blocks=6, seed=123,
     )
-    print("local   ->", peak)
-    print("  samples read:", pinfo["samples_read"],
-          "fraction:", pinfo["sample_fraction"])
+    print(f"leakage capture: seed 2000 Hz (for 2300 Hz tone) -> {captured:.1f} Hz"
+          f" (pulled to the dominant 1500 Hz)")
