@@ -1,0 +1,16 @@
+\contentsline {section}{\numberline {1}Problem and Idea}{1}{section.1}%
+\contentsline {section}{\numberline {2}Mathematical Core}{1}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Power spectral density and autocorrelation}{1}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Band energy as a closed form}{2}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Why a contiguous block --- coherent gain}{2}{subsection.2.3}%
+\contentsline {section}{\numberline {3}Code Walkthrough}{3}{section.3}%
+\contentsline {subsection}{\numberline {3.1}\texttt {ArraySampler} --- the access layer}{3}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}\texttt {band\_energy\_kernel} --- the kernel $g(\tau )$ (pure)}{3}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}\texttt {autocorrelation\_sketch} --- estimating $R(\tau )$}{3}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}\texttt {band\_energy\_from\_sketch} --- evaluating $E$ (pure)}{3}{subsection.3.4}%
+\contentsline {subsection}{\numberline {3.5}\texttt {multiresolution\_band\_search} --- global search (pure)}{4}{subsection.3.5}%
+\contentsline {subsection}{\numberline {3.6}\texttt {local\_peak\_search} --- hill-climb (pure)}{4}{subsection.3.6}%
+\contentsline {subsection}{\numberline {3.7}Convenience wrappers}{4}{subsection.3.7}%
+\contentsline {section}{\numberline {4}Why the Cost Decouples from $N$}{4}{section.4}%
+\contentsline {section}{\numberline {5}The Hard Demo: Spectral Leakage}{5}{section.5}%
+\contentsline {section}{\numberline {6}Summary}{5}{section.6}%

@@ -1,0 +1,340 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  urlcolor=blue!50!black,
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+}
+
+\newcommand{\R}{R}
+\newcommand{\fs}{f_{\mathrm{s}}}
+\DeclareMathOperator{\sinc}{sinc}
+
+\title{Randomized Multiresolution Band-Energy Search\\
+       \large A Sublinear-Time Spectral Peak Finder}
+\author{Notes on \texttt{multires\_bandenergy.py}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\texttt{multires\_bandenergy.py} locates a dominant (or local) spectral peak in a
+discrete signal while reading a number of time-domain samples that does
+\emph{not} grow with the signal length $N$. It never computes an FFT and never
+makes a full pass over the data. The trick is to read a small
+\emph{autocorrelation sketch} from a handful of random contiguous blocks, then
+answer every band-energy question analytically from that sketch via a closed-form
+band-integral kernel. A binary (multiresolution) search over frequency bands
+then converges to the peak in $O(\log)$ decisions, none of which touch the
+signal again. This report derives the underlying mathematics, walks through each
+function, and explains why the cost decouples from $N$.
+\end{abstract}
+
+\tableofcontents
+
+\section{Problem and Idea}
+
+We are given a real signal $x[0\,..\,N-1]$ sampled at rate $\fs$, and we want the
+frequency of a dominant tone (or a local spectral peak near a seed), to some
+target resolution $\Delta f$. The textbook route is an FFT: $O(N\log N)$ time and
+a full pass over the data. Here we instead want \emph{sublinear} access --- read
+$\ll N$ samples --- and we are willing to accept an approximate, Hz-level answer.
+
+The central idea is a divide-and-conquer search in the frequency domain. The
+band $[0,\fs/2]$ is split in half; we ask which half carries more energy; we
+recurse into the winner. After $d$ levels the band has width $(\fs/2)\,2^{-d}$, so
+to reach resolution $\Delta f$ we need only
+\begin{equation}
+  d \;\approx\; \log_2\!\frac{\fs/2}{\Delta f}
+  \label{eq:depth}
+\end{equation}
+yes/no decisions. The whole game is therefore: \emph{how do we answer
+``which half-band has more energy?'' cheaply and reliably}, without an FFT and
+without rereading the signal at every level?
+
+The answer is to precompute a small \textbf{autocorrelation sketch} once, and to
+turn each band-energy query into a closed-form sum over that sketch.
+
+\section{Mathematical Core}
+
+\subsection{Power spectral density and autocorrelation}
+
+For a wide-sense-stationary process the autocorrelation
+\begin{equation}
+  \R(\tau) \;=\; \mathbb{E}\,x[n]\,x[n+\tau]
+  \;\approx\; \frac{1}{N}\sum_n x[n]\,x[n+\tau]
+  \label{eq:acf}
+\end{equation}
+and the power spectral density (PSD) $S(f)$ are a Fourier-transform pair
+(Wiener--Khinchin). With $\tau$ measured in samples and $f$ in Hz,
+\begin{equation}
+  S(f) \;=\; \sum_{\tau=-\infty}^{\infty} \R(\tau)\,
+             e^{-i\,2\pi f \tau/\fs}
+       \;=\; \R(0) + 2\sum_{\tau\ge 1}\R(\tau)\cos\!\Big(\frac{2\pi f\tau}{\fs}\Big),
+  \label{eq:psd}
+\end{equation}
+where the second form uses the fact that $\R$ is real and even
+($\R(-\tau)=\R(\tau)$), so the imaginary parts cancel and each lag contributes a
+cosine.
+
+\subsection{Band energy as a closed form}
+
+The energy in a band $[f_{\mathrm{lo}}, f_{\mathrm{hi}}]$ is the integral of the
+PSD over that band:
+\begin{equation}
+  E[f_{\mathrm{lo}},f_{\mathrm{hi}}]
+   \;=\; \int_{f_{\mathrm{lo}}}^{f_{\mathrm{hi}}} S(f)\,df .
+\end{equation}
+Substituting~\eqref{eq:psd} and exchanging sum and integral,
+\begin{equation}
+  \boxed{\;
+  E[f_{\mathrm{lo}},f_{\mathrm{hi}}]
+   \;=\; \R(0)\,(f_{\mathrm{hi}}-f_{\mathrm{lo}})
+        \;+\; 2\sum_{\tau\ge 1}\R(\tau)\,g(\tau)
+  \;}
+  \label{eq:bandenergy}
+\end{equation}
+where the per-lag \emph{band kernel} is
+\begin{equation}
+  g(\tau) \;=\; \int_{f_{\mathrm{lo}}}^{f_{\mathrm{hi}}}
+                \cos\!\Big(\frac{2\pi f\tau}{\fs}\Big)\,df .
+  \label{eq:kerneldef}
+\end{equation}
+This integral is elementary. For $\tau\ne 0$,
+\begin{equation}
+  g(\tau) \;=\; \frac{\fs}{2\pi\tau}
+    \left[\sin\!\Big(\frac{2\pi f_{\mathrm{hi}}\tau}{\fs}\Big)
+        - \sin\!\Big(\frac{2\pi f_{\mathrm{lo}}\tau}{\fs}\Big)\right],
+  \qquad
+  g(0) \;=\; f_{\mathrm{hi}} - f_{\mathrm{lo}}.
+  \label{eq:kernel}
+\end{equation}
+Equations~\eqref{eq:bandenergy}--\eqref{eq:kernel} are the heart of the module:
+\textbf{once $\R(\tau)$ is known for $\tau=0\,..\,M$, the energy in any band is a
+finite, closed-form sum --- no further data access, no FFT.} In practice $\R$ is
+truncated at a maximum lag $M$, so the sum runs $\tau=1\,..\,M$; this truncation
+is exactly what limits the achievable frequency resolution to $\sim \fs/M$ (the
+kernel oscillates in $f$ with period $\fs/\tau$, and the fastest term we retain
+has period $\fs/M$).
+
+\subsection{Why a contiguous block --- coherent gain}
+
+The reliability of each binary decision comes from a signal-processing fact, not
+from sheer sample count. For a tone $A\sin(2\pi f_0 t)$ in white noise of variance
+$\sigma^2$, the block autocorrelation is
+\begin{equation}
+  \R(\tau) \;\approx\; \frac{A^2}{2}\cos\!\Big(\frac{2\pi f_0\tau}{\fs}\Big)
+                       \;+\; \sigma^2\,\delta_{\tau,0}.
+  \label{eq:tonepluse}
+\end{equation}
+The tone leaves a \emph{clean cosine at every lag} $\tau=1\,..\,M$, while the
+noise contributes \emph{only} at $\tau=0$. When the band in~\eqref{eq:bandenergy}
+contains $f_0$, the cosine in~\eqref{eq:tonepluse} and the kernel
+$g(\tau)$ line up constructively across all $M$ lags --- an $O(M)$ coherent
+build-up. When the band excludes $f_0$, cosine and kernel beat against each other
+and the terms cancel. This $O(M)$ contrast between in-band and out-of-band is what
+makes each yes/no decision correct.
+
+Crucially this build-up requires \emph{phase-coherent} samples, which a
+contiguous block of length $L$ supplies. Scattered point samples (random
+frequencies, or random time-pairs $(n,n')$) carry random relative phase, give no
+coherent build-up, and leave only variance to average down --- which is
+expensive. This is why the module reads \emph{contiguous blocks} rather than
+scattered points.
+
+\section{Code Walkthrough}
+
+The module exposes a small set of mostly \emph{pure} functions (in keeping with
+the project's preference), built around the sketch.
+
+\subsection{\texttt{ArraySampler} --- the access layer}
+
+A thin wrapper around a NumPy array offering point reads
+\verb|sampler(indices)| and contiguous block reads
+\verb|sampler.block(start, length)|. The abstraction matters: for genuinely huge
+signals the same search code would work against an \texttt{mmap}, disk, network,
+or compressed store, because the search only ever asks for a few blocks.
+
+\subsection{\texttt{band\_energy\_kernel} --- the kernel $g(\tau)$ (pure)}
+
+A direct, vectorized implementation of~\eqref{eq:kernel}. It treats $\tau=0$ as a
+special case ($g(0)=f_{\mathrm{hi}}-f_{\mathrm{lo}}$) to avoid the $1/\tau$
+singularity and applies the closed form to all nonzero lags at once:
+\begin{lstlisting}[language=Python]
+out[nz] = (fs / (2.0 * np.pi * tnz)) * (
+    np.sin(2.0 * np.pi * f_hi * tnz / fs)
+    - np.sin(2.0 * np.pi * f_lo * tnz / fs)
+)
+out[~nz] = f_hi - f_lo
+\end{lstlisting}
+
+\subsection{\texttt{autocorrelation\_sketch} --- estimating $\R(\tau)$}
+
+This is the \emph{only} function that reads the signal. It draws \texttt{n\_blocks}
+contiguous blocks of length \texttt{block\_len} ($\approx 4M$ by default, so every
+lag has ample support), each starting at a uniformly random clamped position, and
+for each block accumulates the biased (Bartlett) lag products
+\begin{equation}
+  \hat\R_{\text{block}}(\tau)
+    \;=\; \frac{1}{L}\sum_{n=0}^{L-1-\tau} \tilde x[n]\,\tilde x[n+\tau],
+  \qquad \tau = 0\,..\,M,
+  \label{eq:biasedacf}
+\end{equation}
+where $\tilde x$ is the (optionally) mean-removed block. Note the divisor is the
+fixed block length $L$ (not the per-lag count $L-\tau$): this is the
+\emph{biased} estimator, which tapers the high lags and keeps the kernel sum
+in~\eqref{eq:bandenergy} well-behaved (the unbiased version inflates high-lag
+variance). The per-block estimates are then averaged over the
+\texttt{n\_blocks} blocks to reduce variance. The total signal access is
+\begin{equation}
+  \texttt{samples\_read} \;=\; \texttt{n\_blocks}\times\texttt{block\_len},
+  \label{eq:samples}
+\end{equation}
+which contains no $N$.
+
+\subsection{\texttt{band\_energy\_from\_sketch} --- evaluating $E$ (pure)}
+
+A literal transcription of~\eqref{eq:bandenergy}: build the lag vector
+$\tau=0\,..\,M$, evaluate $g(\tau)$ once, and return
+$\R(0)g(0) + 2\sum_{\tau\ge1}\R(\tau)g(\tau)$. It validates
+$0\le f_{\mathrm{lo}} < f_{\mathrm{hi}} \le \fs/2$. Because only \emph{relative}
+band comparisons drive the search, no absolute normalization is applied.
+
+\subsection{\texttt{multiresolution\_band\_search} --- global search (pure)}
+
+The divide-and-conquer search of Section~2. At each level it splits the current
+band $[lo,hi]$ at the midpoint, evaluates the two half-band energies from the
+sketch, and keeps the higher-energy half:
+\begin{lstlisting}[language=Python]
+mid = 0.5 * (lo + hi)
+e_left  = band_energy_from_sketch(R, fs, lo,  mid)
+e_right = band_energy_from_sketch(R, fs, mid, hi)
+if e_left >= e_right:  hi = mid     # keep left
+else:                  lo = mid     # keep right
+\end{lstlisting}
+It stops when the band narrows below \texttt{min\_width\_hz} (default $\fs/M$, the
+sketch's own resolution --- searching finer is meaningless) or after
+\texttt{max\_depth} levels. The number of levels matches~\eqref{eq:depth}, and
+\emph{every level reads zero samples}. It returns the final band, its center, and
+optionally a full decision trace. It is reliable when there is a single dominant
+band.
+
+\subsection{\texttt{local\_peak\_search} --- hill-climb (pure)}
+
+When a rough location is already known, a local search is cheaper than a global
+one (it explores only $\log(\text{radius}/\Delta f)$ levels). Starting from a seed
+$f_0$ with an initial step (default $16\times$ resolution), it probes band energy
+at the current center and at $\pm\,\text{step}$, moves toward the larger neighbor,
+and \emph{halves the step} once the center is the local maximum:
+\begin{lstlisting}[language=Python]
+if   e_left  > e_center and e_left  >= e_right:  center -= step      # go left
+elif e_right > e_center and e_right >  e_left:   center += step      # go right
+else:                                            step   *= 0.5       # refine
+\end{lstlisting}
+Probe bands are clamped to $[0,\fs/2]$. It stops when the step shrinks to the
+resolution. This is a 1-D coordinate ascent with geometric step refinement ---
+essentially a ternary/golden-style climb on the (sketched) PSD.
+
+\subsection{Convenience wrappers}
+
+\texttt{find\_dominant\_frequency\_sublinear} and
+\texttt{find\_local\_peak\_sublinear} tie the pieces together: choose
+$M \approx \lceil \fs/\Delta f\rceil$ via \texttt{\_resolution\_to\_max\_lag},
+build the sketch once, run the global or local search, and report the recovered
+frequency together with bookkeeping (\texttt{samples\_read},
+\texttt{sample\_fraction}). They are the user-facing entry points.
+
+\section{Why the Cost Decouples from \texorpdfstring{$N$}{N}}
+
+From~\eqref{eq:samples}, the budget is $\texttt{n\_blocks}\cdot\texttt{block\_len}
+\approx \texttt{n\_blocks}\cdot 4M$ --- no $N$. Each factor maps to a real
+requirement:
+
+\begin{itemize}
+  \item \textbf{Resolution $\to M$.} Resolving to $\Delta f$ needs lags out to
+        $M\approx \fs/\Delta f$. A depth-$M$ autocorrelation cannot distinguish
+        features finer than $\fs/M$. So samples scale \emph{linearly in target
+        resolution}, not in $N$. ($N$ re-enters only if you demand bin-exact
+        $\Delta f = \fs/N$, forcing $M\approx N$.)
+  \item \textbf{Confidence $\to$ \texttt{n\_blocks}.} More blocks average down the
+        variance of $\R(\tau)$. For failure probability $\delta$ over the
+        $\sim\log_2(\fs/2/\Delta f)$ decisions (union bound), the block count
+        grows like $\log(1/\delta)$. Still no $N$.
+  \item \textbf{Contrast $\to$ multiplies \texttt{n\_blocks}.} With $\mathrm{gap}$
+        the normalized energy separation between winning and losing half-band,
+        reliable decisions need
+        \begin{equation}
+          \texttt{n\_blocks}\cdot M
+            \;=\; O\!\Big(\tfrac{\log(\text{depth}/\delta)}{\mathrm{gap}^2}\Big).
+        \end{equation}
+        At \emph{fixed SNR} the gap is $N$-independent: as $N$ grows, in-band tone
+        energy ($\propto N$) and in-band noise energy ($\propto N$) grow together,
+        so their ratio holds. This is the deep reason the budget can stay flat.
+  \item \textbf{Search span $\to$ depth.} Logarithmic per~\eqref{eq:depth}, and
+        free of samples because every level reuses the one cached sketch.
+\end{itemize}
+
+In one line,
+\begin{equation}
+  \texttt{samples\_read}
+    \;\approx\; \texttt{n\_blocks}\cdot\frac{4\fs}{\Delta f}
+    \;\approx\; O\!\Big(\frac{\log(1/\delta)}{\mathrm{gap}^2}\cdot\frac{\fs}{\Delta f}\Big).
+\end{equation}
+The empirical sweep bears this out: a 7130\,Hz tone in noise at
+$\Delta f=25$\,Hz, $\texttt{n\_blocks}=4$, reads the \emph{same} 30{,}720 samples
+and recovers $\sim$7137\,Hz across $N=10^5,10^6,10^7$ --- a $100\times$ range of
+$N$ at identical cost and accuracy.
+
+\section{The Hard Demo: Spectral Leakage}
+
+The \texttt{\_\_main\_\_} block constructs a deliberately adversarial signal: eight
+tones of differing strength, all \emph{gated} to a short rectangular burst in the
+middle of a one-million-sample record. The abrupt on/off edges convolve each
+tone's line with a $\sinc$ in frequency, spreading energy into \emph{sidelobes}
+(spectral leakage). The dominant 1500\,Hz tone leaks far enough to partly bury the
+weak 2300\,Hz tone beside it.
+
+The demo shows three regimes:
+\begin{enumerate}
+  \item \textbf{Global search} still picks out the strongest (1500\,Hz) band
+        despite the forest of weaker peaks and the leakage between them.
+  \item \textbf{Local hill-climb} with a seed inside each tone's own neighborhood
+        recovers every peak --- even the masked 2300\,Hz one.
+  \item \textbf{Failure mode:} seeding the weak 2300\,Hz tone from farther out
+        (2000\,Hz) lets the dominant tone's sidelobe leakage drag the climb into
+        the 1500\,Hz peak instead. This honestly illustrates the method's limit:
+        local search follows the local energy gradient, and leakage can reshape
+        that gradient.
+\end{enumerate}
+
+\section{Summary}
+
+The module reduces spectral peak finding to (i) a one-time autocorrelation sketch
+read from a few coherent blocks, and (ii) a closed-form band-energy
+evaluation~\eqref{eq:bandenergy}--\eqref{eq:kernel} that drives a logarithmic-depth
+search reading no further samples. The work is governed by \emph{how finely and
+how confidently} you want the peak located --- resolution $\Delta f$, confidence
+$\delta$, spectral contrast --- and not by \emph{how long} the signal is. The
+honest caveats are that it assumes a dominant (or seed-localizable) peak, that
+truncating $\R$ at lag $M$ caps resolution at $\fs/M$, and that strong spectral
+leakage can mislead the local climb.
+
+\end{document}
